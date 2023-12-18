@@ -634,10 +634,21 @@ func (t *Terminal) csi() stateFn {
 		case 'r':
 			top, bottom := 1, t.MaxRows
 			getParams(p, &top, &bottom)
+
+			switch {
+			// Invert order if top is bigger (alacritty)
+			case top > bottom:
+				top, bottom = bottom, top
+			// Disable scrollRegion if equal (alacritty, xterm)
+			case top == bottom:
+				top, bottom = 1, t.MaxRows
+			}
+
 			t.scrollRegion[0] = clamp(top-1, 0, t.MaxRows)
 			t.scrollRegion[1] = clamp(bottom, 0, t.MaxRows)
+
 			// TODO: this needs some love, it's not working as expected
-			//
+			// some cases it resets cursor, others resets the whole screen
 			switch {
 			case len(p) == 0:
 				// fill(t.screen, Cell{})
