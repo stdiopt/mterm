@@ -24,7 +24,6 @@ func fill[S ~[]T, T any](s S, v T) {
 }
 
 // grow grows a slice by n elements
-
 func grow[S ~[]T, T any](s S, n int) S {
 	l := len(s) + n
 	if l <= cap(s) {
