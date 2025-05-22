@@ -3,7 +3,6 @@ package mterm
 import (
 	"bytes"
 	"fmt"
-	"log"
 	"reflect"
 	"runtime"
 	"slices"
@@ -11,6 +10,18 @@ import (
 	"sync"
 	"unicode"
 	"unicode/utf8"
+)
+
+type CursorStyle int
+
+const (
+	CursorBlinkingBlock CursorStyle = iota
+	CursorDefault
+	CursorSteadyBlock
+	CursorBlinkingUnderline
+	CursorSteadyUnderline
+	CursorBlinkingBar
+	CursorSteadyBar
 )
 
 type stateFn func(t *Terminal, r rune) (stateFn, error)
@@ -70,6 +81,16 @@ func (t *Terminal) Cells() []Cell {
 	return slices.Clone(t.screens[t.screenTarget].cells)
 }
 
+//ScreenView returns a clone of the current screen view
+// if the buf is too small it will alocate a new one
+func (t *Terminal) ScreenView(buf []Cell) []Cell {
+	t.mux.Lock()
+	defer t.mux.Unlock()
+
+	sv := t.screenView()
+	return append(buf[:0], sv...)
+}
+
 type EscapeError struct {
 	Err    error
 	Offset int
@@ -116,7 +137,6 @@ func (t *Terminal) Resize(rows, cols int) {
 		// What to do?!
 		return
 	}
-	log.Println("Resizing to:", rows, cols)
 
 	switch t.screenTarget {
 	case 0:
@@ -163,6 +183,21 @@ func (t *Terminal) CursorPos() (int, int) {
 
 	s := t.screens[t.screenTarget]
 	return s.cursor[0], s.cursor[1]
+}
+func (t *Terminal) CursorVisible() bool {
+	t.mux.Lock()
+	defer t.mux.Unlock()
+
+	s := t.screens[t.screenTarget]
+	return !s.hideCursor
+}
+
+func (t *Terminal) CursorStyle() CursorStyle {
+	t.mux.Lock()
+	defer t.mux.Unlock()
+
+	s := t.screens[t.screenTarget]
+	return s.cursorStyle
 }
 
 func (t *Terminal) put(r rune) error {
@@ -233,11 +268,11 @@ func (t *Terminal) normal(r rune) (stateFn, error) {
 		t.nextLine()
 		s.cursor[1] = 0
 
-		// screen := t.screenView()
+		screen := t.screenView()
 		prevLine := s.cursor[0] - 1
 		// find current line ending (non space) and mark it as new line
 		// clear any previous newlines marks on the line
-		line := t.screenLine(prevLine) // screen[prevLine*cols : prevLine*cols+cols]
+		line := screen[prevLine*cols : prevLine*cols+cols]
 		mark := 0
 		for i := range line {
 			line[i].nl = false
@@ -300,10 +335,15 @@ func (t *Terminal) esc(r rune) (stateFn, error) {
 			// ignore string
 			return (*Terminal).normal
 		}), nil
+	case 'P': // TODO: {lpf} (completed by copilot: Device Control String (DCS)
+		return t.captureString(func(s string) stateFn {
+			// ignore string
+			return (*Terminal).normal
+		}), nil
 	case '\\':
 		// TODO: {lpf} (completed by copilot: String Terminator (ST))
 	default:
-		return (*Terminal).normal, fmt.Errorf("unknown escape sequence: %d %[1]c", r)
+		return (*Terminal).normal, fmt.Errorf("unknown escape sequence: %q", r)
 	}
 	return (*Terminal).normal, nil
 }
@@ -388,6 +428,43 @@ func (t *Terminal) csiGT() stateFn {
 	}
 }
 
+func (t *Terminal) csiQ() stateFn {
+	nextParam := true
+	var p []int
+	return func(_ *Terminal, r rune) (stateFn, error) {
+		if unicode.IsNumber(r) {
+			if nextParam {
+				nextParam = false
+				p = append(p, 0)
+			}
+			last := len(p) - 1
+			p[last] = p[last]*10 + int(r-'0')
+			return nil, nil
+		}
+		switch r {
+		case '$': // sequences like ESC[?2031$p which
+			return nil, nil // ignore
+		case 'l': //\x1b[?25l
+			s := t.screens[t.screenTarget]
+			s.hideCursor = true
+		case 'h': //\x1b[?25h
+			s := t.screens[t.screenTarget]
+			s.hideCursor = false
+		case 'p': //\x1b[?25p
+		case 'u': // \x1b[?u restore cursor position
+			s := t.screens[t.screenTarget]
+			s.cursor[0] = t.saveCursor[0]
+			s.cursor[1] = t.saveCursor[1]
+		case 's':
+			s := t.screens[t.screenTarget]
+			t.saveCursor = [2]int{s.cursor[0], s.cursor[1]}
+		default:
+			return (*Terminal).normal, fmt.Errorf("unknown CSI?: %q", r)
+		}
+		return (*Terminal).normal, nil
+	}
+}
+
 // State Control Sequence Introducer
 func (t *Terminal) csi() stateFn {
 	s := t.screens[t.screenTarget]
@@ -410,10 +487,15 @@ func (t *Terminal) csi() stateFn {
 		}
 
 		switch r {
-		// for sequences like ESC[?25l (hide cursor)
-		case '?':
-			// maybe set a flag somewhere or use a new state
+		case ' ': // odd case
 			return nil, nil
+		case 'q':
+			n := 1
+			getParams(p, &n)
+			s.cursorStyle = CursorStyle(n)
+
+		case '?':
+			return t.csiQ(), nil
 		case '>':
 			return t.csiGT(), nil
 		// Cursor movement
@@ -555,11 +637,13 @@ func (t *Terminal) csi() stateFn {
 		case 'm':
 			err := t.cstate.Set(p...)
 			return (*Terminal).normal, err
-		case 'u':
-			s.cursor[0] = t.saveCursor[0]
-			s.cursor[1] = t.saveCursor[1]
-		case 's':
-			t.saveCursor = [2]int{s.cursor[0], s.cursor[1]}
+			/*
+				case 'u':
+					s.cursor[0] = t.saveCursor[0]
+					s.cursor[1] = t.saveCursor[1]
+				case 's':
+					t.saveCursor = [2]int{s.cursor[0], s.cursor[1]}
+			*/
 		case 'c':
 			// TODO: {lpf} (comment by copilot: Send device attributes)
 		case 'h':
@@ -635,7 +719,7 @@ func (t *Terminal) csi() stateFn {
 			copy(region[n*cols:], region)
 			fill(region[:n*cols], Cell{})
 		default:
-			return (*Terminal).normal, fmt.Errorf("unknown CSI: %d %[1]c", r)
+			return (*Terminal).normal, fmt.Errorf("unknown CSI: %q", r)
 
 		}
 		return (*Terminal).normal, nil
@@ -681,7 +765,7 @@ func (t *Terminal) getScreenAsAnsi(cursor bool) []byte {
 		if x >= cols {
 			y++
 			x = 0
-			buf.WriteString("\r\n")
+			buf.WriteString("\r\n\033[0m")
 			lastState = SGRState{}
 		}
 		c := screen[i]

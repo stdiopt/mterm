@@ -12,6 +12,9 @@ type Grid struct {
 	backlogSize int
 	size        [2]int
 	cursor      [2]int
+
+	cursorStyle CursorStyle
+	hideCursor  bool
 }
 
 func (g *Grid) Size() (rows, cols int) {
@@ -117,7 +120,7 @@ func (g *Grid) ResizeAndReflow(rows, cols int) {
 	g.cells = newCells
 	g.size = [2]int{rows, cols}
 	g.cursor = [2]int{
-		cursorLine,
+		clamp(cursorLine, 0, rows-1),
 		clamp(g.cursor[1], 0, cols-1),
 	}
 }
