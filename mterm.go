@@ -61,7 +61,7 @@ func New(rows, cols int) *Terminal {
 					rows,
 					cols,
 				},
-				backlogSize: 1000,
+				backlogSize: 10000,
 			},
 		},
 
@@ -146,6 +146,24 @@ func (t *Terminal) Resize(rows, cols int) {
 	}
 	t.saveCursor = [2]int{0, 0}
 	t.scrollRegion = [2]int{0, rows} // reset?! or resize
+}
+
+func (t *Terminal) Size() (rows, cols int) {
+	t.mux.Lock()
+	defer t.mux.Unlock()
+
+	return t.screens[t.screenTarget].Size()
+}
+
+// FullSize returns the full size of the terminal, including scrollback
+func (t *Terminal) FullSize() (rows, cols int) {
+	t.mux.Lock()
+	defer t.mux.Unlock()
+
+	cols = t.screens[t.screenTarget].size[1]
+	rows = len(t.screens[t.screenTarget].cells) / cols
+	// return the full size of the terminal
+	return rows, cols
 }
 
 // Clear clears the terminal moving cursor to 0,0
@@ -637,13 +655,6 @@ func (t *Terminal) csi() stateFn {
 		case 'm':
 			err := t.cstate.Set(p...)
 			return (*Terminal).normal, err
-			/*
-				case 'u':
-					s.cursor[0] = t.saveCursor[0]
-					s.cursor[1] = t.saveCursor[1]
-				case 's':
-					t.saveCursor = [2]int{s.cursor[0], s.cursor[1]}
-			*/
 		case 'c':
 			// TODO: {lpf} (comment by copilot: Send device attributes)
 		case 'h':
